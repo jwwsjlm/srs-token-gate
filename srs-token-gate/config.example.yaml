@@ -1,0 +1,38 @@
+# SRS Token Gate 统一业务配置。
+# 首次执行 docker compose up 时会自动复制为 config.yaml，并补全密码和 Hook Secret。
+version: 1
+
+public:
+  # 生成 RTMP 推流地址时使用的域名或公网 IP。
+  # 留空时前端使用当前浏览器访问的主机名。
+  address: ""
+
+admin:
+  # 控制台登录用户名。
+  username: admin
+  # password_hash 非空时优先使用 bcrypt；二者都为空时首次启动自动生成强密码。
+  password: ""
+  password_hash: ""
+
+session:
+  # HTTPS 域名模式设为 true；HTTP/IP 直连模式必须设为 false。
+  cookie_secure: false
+  # 管理员登录会话有效期，单位为秒，默认 24 小时。
+  max_age_seconds: 86400
+
+srs:
+  # WebRTC SDP 公网候选 IP。使用 WebRTC 时填写服务器公网 IP，不要填写域名。
+  # 不使用 WebRTC 或希望由 SRS 自动发现时可以留空。
+  candidate: ""
+  # SRS 回调 Token Gate 使用的内部共享密钥；留空时首次启动自动生成。
+  hook_secret: ""
+  # SRS 最大连接数，包含推流、播放和管理连接。
+  max_connections: 1000
+  # 建议保持 warn，避免 SRS info 日志记录带 Token 的媒体 URL 和 Hook 参数。
+  log_level: warn
+
+statistics:
+  # HLS 等短连接最后活跃后的保留时间（秒）。
+  active_ttl_seconds: 30
+  # 与 SRS 客户端列表对账的间隔（秒）。
+  reconcile_interval_seconds: 15

@@ -1,0 +1,65 @@
+# SRS Token Gate 单机部署。
+# 用户只需修改 .env 和 srs-token-gate/config.yaml，然后执行 docker compose pull && docker compose up -d。
+
+services:
+  # Token Gate：负责初始化统一配置、生成 SRS 配置、后台登录、Token 鉴权和控制台反代。
+  token-auth:
+    image: "${TOKEN_GATE_IMAGE:-docker.io/guanren/srs-token-gate:latest}"
+    container_name: srs-token-auth
+    restart: unless-stopped
+    volumes:
+      # 需要写入 config.yaml、HLS 目录和生成的运行配置。
+      - ./srs-token-gate:/workspace
+      # Token 数据单独持久化，避免混入镜像。
+      - ./srs-token-gate/data:/data
+      - srs-generated:/generated
+    environment:
+      # 用于生成 RTMP 地址；RTMP 端口由 .env 控制。
+      RTMP_PORT: "${RTMP_PORT:-1935}"
+    ports:
+      # 域名反代填 127.0.0.1；IP 直连填 0.0.0.0。
+      - "${GATEWAY_BIND:-127.0.0.1}:${GATEWAY_PORT:-9085}:8085/tcp"
+    healthcheck:
+      test: ["CMD", "/app/token-auth", "healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # SRS 媒体服务器。只有 Token Gate 健康后才启动，确保 Hook 配置已经生成。
+  srs:
+    image: ossrs/srs:6
+    container_name: srs
+    restart: unless-stopped
+    depends_on:
+      token-auth:
+        condition: service_healthy
+    volumes:
+      - ./srs-token-gate/data/hls:/usr/local/srs/objs/nginx/html/live
+      - ./srs-token-gate/conf:/opt/srs-token-gate/conf:ro
+      - ./srs-token-gate/scripts:/opt/srs-token-gate/scripts:ro
+      - srs-generated:/generated:ro
+    command: ["/bin/sh", "/opt/srs-token-gate/scripts/start-srs.sh"]
+    ports:
+      # RTMP 推流和播放。
+      - "${RTMP_PORT:-1935}:1935/tcp"
+      # SRS API 和源站 HTTP 仅允许宿主机回环访问，不能绕过 Token Gate。
+      - "127.0.0.1:1985:1985/tcp"
+      - "127.0.0.1:8080:8080/tcp"
+      # WebRTC 媒体端口；使用 WebRTC 时放行 TCP/UDP 8000。
+      - "${RTC_UDP_PORT:-8000}:8000/udp"
+      - "${RTC_TCP_PORT:-8000}:8000/tcp"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  # gate-auth 生成的 SRS 运行配置，仅在 Docker 内部共享。
+  srs-generated:

@@ -1,0 +1,16 @@
+# Production credentials and server-specific files.
+*.key
+*.pem
+.env
+
+srs-token-gate/data/
+srs-token-gate/config.yaml
+srs-token-gate/runtime/
+
+# Editor and OS metadata.
+.DS_Store
+Thumbs.db
+
+# Local runtime output.
+*.log
+*.tmp
