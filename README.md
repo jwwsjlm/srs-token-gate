@@ -496,8 +496,6 @@ Action 会构建 `linux/amd64` 镜像，并发布以下标签：
 
 ```text
 docker.io/guanren/srs-token-gate:1.0.0
-docker.io/guanren/srs-token-gate:1.0
-docker.io/guanren/srs-token-gate:1
 docker.io/guanren/srs-token-gate:latest
 ```
 
