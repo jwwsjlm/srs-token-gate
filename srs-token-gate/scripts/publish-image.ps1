@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 $tokenAuth = Join-Path $projectRoot 'srs-token-gate/token-auth'
-$image = if ($env:TOKEN_GATE_IMAGE) { $env:TOKEN_GATE_IMAGE } else { 'docker.io/guanren/srs-token-gate:latest' }
+$image = if ($env:TOKEN_GATE_IMAGE) { $env:TOKEN_GATE_IMAGE } else { 'ghcr.io/jwwsjlm/srs-token-gate:latest' }
 $proxy = if ($env:GOPROXY) { $env:GOPROXY } else { 'https://goproxy.cn,direct' }
 
 Write-Host 'Running Go tests...'

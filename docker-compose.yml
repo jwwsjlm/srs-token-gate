@@ -4,7 +4,7 @@
 services:
   # Token Gate：负责初始化统一配置、生成 SRS 配置、后台登录、Token 鉴权和控制台反代。
   token-auth:
-    image: "${TOKEN_GATE_IMAGE:-docker.io/guanren/srs-token-gate:latest}"
+    image: "${TOKEN_GATE_IMAGE:-ghcr.io/jwwsjlm/srs-token-gate:latest}"
     container_name: srs-token-auth
     restart: unless-stopped
     volumes:

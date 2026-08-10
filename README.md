@@ -53,7 +53,7 @@ SRS 的 `1985` 和 `8080` 只绑定宿主机回环地址，不能从公网绕过
 | `srs-token-gate/token-auth/vendor/` | 固定版本的 Go 依赖源码 |
 | `srs-token-gate/data/` | Token 数据和 HLS 文件，生产环境不提交 |
 | `srs-token-gate/config.yaml` | 实际运行配置，生产环境不提交 |
-| `.github/workflows/publish-docker.yml` | 推送 `v*.*.*` Tag 时发布 Docker Hub 镜像 |
+| `.github/workflows/publish-docker.yml` | 推送 `v*.*.*` Tag 时发布 GitHub Container Registry 镜像 |
 
 GitHub Actions 发布镜像时只使用 `srs-token-gate/token-auth/` 作为 Docker 构建上下文。真实配置、Token、Cookie、私钥和生产日志不会进入仓库或镜像。
 
@@ -156,7 +156,7 @@ RTC_UDP_PORT=8000
 RTC_TCP_PORT=8000
 
 # Token Gate 公开镜像。
-TOKEN_GATE_IMAGE=docker.io/guanren/srs-token-gate:latest
+TOKEN_GATE_IMAGE=ghcr.io/jwwsjlm/srs-token-gate:latest
 ```
 
 ### `config.yaml`
@@ -461,13 +461,15 @@ go vet ./...
 Windows 上发布 `linux/amd64` 镜像：
 
 ```powershell
+# 手动发布前先使用 GitHub Personal Access Token 登录 GHCR。
+docker login ghcr.io
 .\srs-token-gate\scripts\publish-image.ps1
 ```
 
 默认发布到：
 
 ```text
-docker.io/guanren/srs-token-gate:latest
+ghcr.io/jwwsjlm/srs-token-gate:latest
 ```
 
 ## GitHub Tag 自动发布镜像
@@ -478,12 +480,9 @@ docker.io/guanren/srs-token-gate:latest
 .github/workflows/publish-docker.yml
 ```
 
-它只负责构建并推送 Docker 镜像，不运行项目测试或其他自动检查。发布前需要在 GitHub 仓库的 `Settings → Secrets and variables → Actions` 中配置：
+它只负责构建并推送 Docker 镜像，不运行项目测试或其他自动检查。Workflow 使用 GitHub Actions 自动提供的 `GITHUB_TOKEN`，不需要配置 Docker Hub 用户名或密码；仓库权限中已声明 `packages: write`。
 
-```text
-DOCKERHUB_USERNAME=guanren
-DOCKERHUB_TOKEN=<Docker Hub Access Token>
-```
+首次发布后，请在 GitHub 仓库的 `Packages` 页面将该容器包设置为 `Public`，这样生产服务器无需登录即可拉取镜像。
 
 推送语义化版本 Tag 即可发布：
 
@@ -495,20 +494,20 @@ git push origin v1.0.0
 Action 会构建 `linux/amd64` 镜像，并发布以下标签：
 
 ```text
-docker.io/guanren/srs-token-gate:1.0.0
-docker.io/guanren/srs-token-gate:latest
+ghcr.io/jwwsjlm/srs-token-gate:1.0.0
+ghcr.io/jwwsjlm/srs-token-gate:latest
 ```
 
 生产环境推荐固定版本：
 
 ```env
-TOKEN_GATE_IMAGE=docker.io/guanren/srs-token-gate:1.0.0
+TOKEN_GATE_IMAGE=ghcr.io/jwwsjlm/srs-token-gate:1.0.0
 ```
 
 希望跟随最新版本时使用：
 
 ```env
-TOKEN_GATE_IMAGE=docker.io/guanren/srs-token-gate:latest
+TOKEN_GATE_IMAGE=ghcr.io/jwwsjlm/srs-token-gate:latest
 ```
 
 升级：
@@ -645,16 +644,16 @@ OBS 必须拆开填写：
 
 这是预期行为。Compose 将它们绑定到宿主机 `127.0.0.1`，防止绕过 Token Gate。公网入口应使用域名反代或 IP 直连的 `9085`。
 
-### Docker Hub 拉取失败
+### GitHub Container Registry 拉取失败
 
 检查镜像配置：
 
 ```bash
 docker compose config | grep TOKEN_GATE_IMAGE
-docker pull docker.io/guanren/srs-token-gate:latest
+docker pull ghcr.io/jwwsjlm/srs-token-gate:latest
 ```
 
-生产环境推荐固定到已经验证过的版本标签，避免 `latest` 在升级时发生变化。
+公开 GHCR 镜像可以匿名拉取；如果仓库被设置为私有，需要先执行 `docker login ghcr.io`。生产环境推荐固定到已经验证过的版本标签，避免 `latest` 在升级时发生变化。
 
 ### 端口已被占用
 
