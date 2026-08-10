@@ -31,10 +31,31 @@ WebRTC 媒体          ───────────────────
 SRS Hook ──────────────────────────────────> Token Gate
 ```
 
-- `srs-token-auth`：自动初始化配置、登录、Token 管理、鉴权和 HTTP 反向代理。
+- `token-auth`（容器名 `srs-token-auth`）：自动初始化配置、登录、Token 管理、鉴权和 HTTP 反向代理。
 - `srs`：处理 RTMP、HTTP-FLV、HLS 和 WebRTC 媒体。
 
 SRS 的 `1985` 和 `8080` 只绑定宿主机回环地址，不能从公网绕过 Token Gate。
+
+## 项目目录
+
+| 路径 | 用途 |
+|---|---|
+| `.env.example` | Docker 监听地址、端口和镜像配置模板 |
+| `docker-compose.yml` | 两容器部署编排 |
+| `README.md` | 安装、配置、推拉流和排错教程 |
+| `srs-token-gate/config.example.yaml` | 统一业务配置模板 |
+| `srs-token-gate/conf/console/` | SRS 控制台覆盖页面和 Token 页面 |
+| `srs-token-gate/conf/srs/` | SRS Hook、鉴权、HLS 和 WebRTC 配置模板 |
+| `srs-token-gate/docs/` | Nginx/OpenResty 和 Token 相关文档 |
+| `srs-token-gate/scripts/start-srs.sh` | 安装控制台文件并启动 SRS |
+| `srs-token-gate/scripts/publish-image.ps1` | 本地手动构建并发布 Docker 镜像 |
+| `srs-token-gate/token-auth/` | Go Token Gate 源码和 Dockerfile |
+| `srs-token-gate/token-auth/vendor/` | 固定版本的 Go 依赖源码 |
+| `srs-token-gate/data/` | Token 数据和 HLS 文件，生产环境不提交 |
+| `srs-token-gate/config.yaml` | 实际运行配置，生产环境不提交 |
+| `.github/workflows/publish-docker.yml` | 推送 `v*.*.*` Tag 时发布 Docker Hub 镜像 |
+
+GitHub Actions 发布镜像时只使用 `srs-token-gate/token-auth/` 作为 Docker 构建上下文。真实配置、Token、Cookie、私钥和生产日志不会进入仓库或镜像。
 
 ## 环境要求
 
@@ -175,6 +196,26 @@ statistics:
 ```
 
 `config.yaml` 包含管理员密码和 Hook Secret，文件权限应保持为 `0600`。
+
+### 配置项速查
+
+| 配置项 | 作用 | 热加载 | 备注 |
+|---|---|---|---|
+| `version` | 配置格式版本 | 否 | 变更后需要重启 |
+| `public.address` | 生成推拉流地址使用的域名或公网 IP | 是 | 留空时使用当前访问地址 |
+| `admin.username` | 管理员用户名 | 否 | 变更后需要重启 |
+| `admin.password` | 明文管理员密码 | 否 | 仅在没有 `password_hash` 时使用 |
+| `admin.password_hash` | bcrypt 管理员密码哈希 | 否 | 非空时优先使用 |
+| `session.cookie_secure` | 是否只允许 HTTPS Cookie | 否 | HTTPS 为 `true`，IP HTTP 为 `false` |
+| `session.max_age_seconds` | 管理员 Session 有效期 | 否 | 默认 86400 秒 |
+| `srs.candidate` | WebRTC SDP 公网候选 IP | 是 | 只能填写公网 IP |
+| `srs.hook_secret` | SRS Hook 内部共享密钥 | 否 | 不要提交或记录 |
+| `srs.max_connections` | SRS 最大连接数 | 是 | 由 SRS RAW reload 应用 |
+| `srs.log_level` | SRS 日志级别 | 是 | 建议使用 `warn` |
+| `statistics.active_ttl_seconds` | HLS 最后活跃后的保留时间 | 是 | 默认 30 秒 |
+| `statistics.reconcile_interval_seconds` | SRS 客户端对账间隔 | 是 | 默认 15 秒 |
+
+`.env` 中的监听地址、端口和 `TOKEN_GATE_IMAGE` 属于 Compose 配置，修改后需要重新创建容器，不属于 `config.yaml` 热加载范围。
 
 ## 域名 HTTPS 模式
 
@@ -429,11 +470,222 @@ Windows 上发布 `linux/amd64` 镜像：
 docker.io/guanren/srs-token-gate:latest
 ```
 
+## GitHub Tag 自动发布镜像
+
+仓库内置 GitHub Actions：
+
+```text
+.github/workflows/publish-docker.yml
+```
+
+它只负责构建并推送 Docker 镜像，不运行项目测试或其他自动检查。发布前需要在 GitHub 仓库的 `Settings → Secrets and variables → Actions` 中配置：
+
+```text
+DOCKERHUB_USERNAME=guanren
+DOCKERHUB_TOKEN=<Docker Hub Access Token>
+```
+
+推送语义化版本 Tag 即可发布：
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Action 会构建 `linux/amd64` 镜像，并发布以下标签：
+
+```text
+docker.io/guanren/srs-token-gate:1.0.0
+docker.io/guanren/srs-token-gate:1.0
+docker.io/guanren/srs-token-gate:1
+docker.io/guanren/srs-token-gate:latest
+```
+
+生产环境推荐固定版本：
+
+```env
+TOKEN_GATE_IMAGE=docker.io/guanren/srs-token-gate:1.0.0
+```
+
+希望跟随最新版本时使用：
+
+```env
+TOKEN_GATE_IMAGE=docker.io/guanren/srs-token-gate:latest
+```
+
+升级：
+
+```bash
+docker compose pull token-auth
+docker compose up -d --force-recreate
+```
+
+不要重复移动已经发布的版本 Tag；需要修复版本时发布新的 Tag。
+
 ## 常见问题
 
-### 初始化容器为什么不见了？
+先执行下面三条命令查看最基本状态：
 
-当前版本只有 `srs-token-auth` 和 `srs` 两个容器。初始化已经合并到 Token Gate 启动流程中。
+```bash
+docker compose ps
+docker compose logs --tail=100 token-auth
+docker compose logs --tail=100 srs
+```
+
+检查 Compose 文件是否能被正确解析：
+
+```bash
+docker compose config
+```
+
+### `token-auth` 显示 unhealthy
+
+确认 Token Gate 日志中没有配置解析错误：
+
+```bash
+docker compose logs --tail=100 token-auth
+```
+
+常见原因：
+
+- `config.yaml` YAML 缩进错误。
+- `admin.username` 为空。
+- `admin.password` 和 `admin.password_hash` 同时为空且容器没有写权限。
+- `GATEWAY_PORT` 已被其他服务占用。
+
+### 首页跳转到 `/token/`
+
+这是未登录保护行为。登录后访问：
+
+```text
+/console/ng_index.html#/summaries
+```
+
+如果登录后仍然循环跳转，检查 HTTPS 域名是否配置了：
+
+```yaml
+session:
+  cookie_secure: true
+```
+
+IP HTTP 模式必须使用：
+
+```yaml
+session:
+  cookie_secure: false
+```
+
+### 忘记管理员密码
+
+```bash
+docker compose run --rm token-auth show-admin-password
+```
+
+如果使用 `admin.password_hash`，系统不会显示原始密码，只能修改配置中的哈希并重新创建容器。
+
+### 修改配置后没有生效
+
+支持热加载的字段保存后会自动监听，也可以在 Token 页面点击“重载统一配置”。检查日志：
+
+```bash
+docker compose logs --tail=100 token-auth
+```
+
+管理员、Session、Hook Secret、监听地址或端口变更需要：
+
+```bash
+docker compose up -d --force-recreate
+```
+
+### OBS 推流失败
+
+OBS 必须拆开填写：
+
+```text
+服务器：rtmp://域名或IP/live
+串流密钥：stream?token=<token>
+```
+
+不能把完整 RTMP 地址填入服务器后，再在串流密钥中重复填写 Token。
+
+如果日志中出现类似：
+
+```text
+?token=xxx?token=xxx
+```
+
+说明客户端重复拼接了 Token。
+
+### HTTP-FLV 返回 403
+
+按以下顺序排查：
+
+1. URL 是否包含 `?token=`。
+2. Token 是否启用。
+3. Token 权限是否包含 `play` 或 `both`。
+4. Token 是否绑定了其他流名。
+5. 播放地址中的流名是否与生成器一致。
+
+### HLS 返回 403 或 404
+
+- `403`：通常是缺少 Token、Token 错误或流名限制不匹配。
+- `404`：通常是当前没有推流，或 HLS 文件尚未生成。
+- HLS 播放列表和 TS 分片需要继续携带 Token。
+
+### WebRTC WHIP/WHEP 返回 403 或 502
+
+- `403`：Token 缺失、权限不匹配或流名不匹配。
+- `502`：鉴权已经通过，但 SRS WebRTC 信令或 SDP 请求失败；检查 `srs` 日志和 `srs.candidate`。
+- `srs.candidate` 必须填写公网 IP，不能填写域名。
+- 防火墙需要放行 UDP/TCP `8000`。
+
+### SRS API 返回 401
+
+公网访问 `/api/v1/*` 必须先登录 Token Gate 管理页面。SRS 原生 `1985` 端口不提供公网访问，属于安全设计。
+
+### 公网无法访问 `1985` 或 `8080`
+
+这是预期行为。Compose 将它们绑定到宿主机 `127.0.0.1`，防止绕过 Token Gate。公网入口应使用域名反代或 IP 直连的 `9085`。
+
+### Docker Hub 拉取失败
+
+检查镜像配置：
+
+```bash
+docker compose config | grep TOKEN_GATE_IMAGE
+docker pull docker.io/guanren/srs-token-gate:latest
+```
+
+生产环境推荐固定到已经验证过的版本标签，避免 `latest` 在升级时发生变化。
+
+### 端口已被占用
+
+查看占用端口：
+
+```bash
+ss -lntup | grep -E '1935|8000|9085'
+```
+
+修改 `.env` 中的 `GATEWAY_PORT`、`RTMP_PORT` 或 WebRTC 端口后重新创建容器。
+
+### 日志占满磁盘
+
+Compose 已为 `token-auth` 和 `srs` 配置 `10MB × 3` 的 Docker 日志轮转。检查配置：
+
+```bash
+docker inspect srs-token-auth --format '{{json .HostConfig.LogConfig}}'
+docker inspect srs --format '{{json .HostConfig.LogConfig}}'
+```
+
+外部 Nginx/OpenResty 日志需要单独配置轮转。
+
+### 当前调用用户数量和底层连接数量不同
+
+页面按 Token 用户、IP、应用、流名和推流/播放方向聚合。HLS 的主播放列表、子列表和 TS 分片会合并为一个用户，但“关联连接数”仍会显示底层请求数量。
+
+### 为什么只有两个容器？
+
+当前版本只有 `srs-token-auth` 和 `srs` 两个长期容器。初始化已经合并到 Token Gate 启动流程中。
 
 ### 修改 `config.yaml` 是否每次都需要重新编译？
 
