@@ -11,6 +11,9 @@ SRS Token Gate 在 [SRS](https://github.com/ossrs/srs) 前增加一个 Go 网关
 - WebRTC WHIP 推流和 WHEP 播放 Token 鉴权。
 - Token 可设置推流、播放或双向权限。
 - Token 可精确绑定指定流名称。
+- 持久化房间管理，创建房间时自动生成专属双向 Token。
+- 地址生成器可直接选择房间，房间名会显示在 RTMP、FLV、HLS 和 WebRTC 地址中。
+- 当前调用用户可按房间筛选，推流和播放统计同步切换。
 - 独立页内登录和统一 SRS 控制台。
 - 按用户、IP、应用、流名和方向聚合在线调用用户。
 - 自动合并 HLS 播放列表和 TS 分片请求。
@@ -300,17 +303,30 @@ http://203.0.113.10:9085/token/
 
 不要将 `1985` 或 `8080` 直接开放到公网。
 
-## Token 使用
+## 房间与 Token 使用
 
 登录控制台后打开“Token 鉴权”页面：
 
-1. 填写调用用户名称。
-2. 选择权限：推流、播放或推流和播放。
-3. 可选填写限定流名。
-4. 点击“生成密钥”。
-5. 在地址生成器中复制所需地址。
+推荐使用房间模式：
 
-限定流名采用精确匹配。例如 Token 绑定 `camera01` 后，不能访问 `camera02`。
+1. 输入房间名，例如 `huiyi-01`。
+2. 点击“创建房间并生成 Token”。
+3. 在地址生成器中选择房间。
+4. 页面自动带入房间 Token，并生成全部推流和播放地址。
+
+房间名直接作为流名称，因此地址中可以直接识别房间：
+
+```text
+rtmp://example.com:1935/live/huiyi-01?token=<token>
+https://example.com/live/huiyi-01.flv?token=<token>
+https://example.com/live/huiyi-01.m3u8?token=<token>
+```
+
+房间名仅允许小写字母、数字、`-`、`_`，必须以字母或数字开头，最多 64 个字符。房间自带 Token 同时具有推流和播放权限，并只能访问该房间。
+
+“独立 Token 高级管理”继续支持原有模式：填写调用用户、权限和可选限定流名，然后手动选择 Token 和流名称。
+
+限定流名采用精确匹配。例如房间 Token 绑定 `huiyi-01` 后，不能访问其他房间。
 
 ### OBS 推流
 
@@ -318,7 +334,7 @@ OBS 必须分开填写：
 
 ```text
 服务器：rtmp://example.com/live
-串流密钥：camera01?token=<token>
+串流密钥：huiyi-01?token=<token>
 ```
 
 不要同时在服务器地址和串流密钥中重复填写 Token。
@@ -326,26 +342,26 @@ OBS 必须分开填写：
 ### FFmpeg 或单地址客户端
 
 ```text
-rtmp://example.com:1935/live/camera01?token=<token>
+rtmp://example.com:1935/live/huiyi-01?token=<token>
 ```
 
 ### HTTP-FLV
 
 ```text
-https://example.com/live/camera01.flv?token=<token>
+https://example.com/live/huiyi-01.flv?token=<token>
 ```
 
 ### HLS
 
 ```text
-https://example.com/live/camera01.m3u8?token=<token>
+https://example.com/live/huiyi-01.m3u8?token=<token>
 ```
 
 ### WebRTC WHIP/WHEP
 
 ```text
-https://example.com/rtc/v1/whip/?app=live&stream=camera01&token=<token>
-https://example.com/rtc/v1/whep/?app=live&stream=camera01&token=<token>
+https://example.com/rtc/v1/whip/?app=live&stream=huiyi-01&token=<token>
+https://example.com/rtc/v1/whep/?app=live&stream=huiyi-01&token=<token>
 ```
 
 ## 配置热加载
@@ -424,7 +440,7 @@ srs-token-gate/data/tokens.json
 srs-token-gate/data/hls/
 ```
 
-更新镜像或重建容器不会重新生成已有 Token。
+房间、房间 Token、独立 Token 和会话数据都保存在 `tokens.json`。更新镜像或重建容器不会重新生成已有数据。
 
 不要提交以下内容到 GitHub：
 

@@ -33,6 +33,7 @@ import (
 
 type Key struct {
 	ID         int64  `json:"id"`
+	RoomID     int64  `json:"room_id,omitempty"`
 	Name       string `json:"name"`
 	Token      string `json:"token"`
 	TokenHash  string `json:"token_hash,omitempty"`
@@ -42,6 +43,12 @@ type Key struct {
 	Enabled    bool   `json:"enabled"`
 	CreatedAt  int64  `json:"created_at"`
 	LastUsedAt int64  `json:"last_used_at"`
+}
+type Room struct {
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	KeyID     int64  `json:"key_id"`
+	CreatedAt int64  `json:"created_at"`
 }
 type Session struct {
 	ClientID   string `json:"client_id"`
@@ -57,9 +64,11 @@ type Session struct {
 	LastSeenAt int64  `json:"last_seen_at"`
 }
 type StoreData struct {
-	NextID   int64     `json:"next_id"`
-	Keys     []Key     `json:"keys"`
-	Sessions []Session `json:"sessions"`
+	NextID     int64     `json:"next_id"`
+	NextRoomID int64     `json:"next_room_id,omitempty"`
+	Keys       []Key     `json:"keys"`
+	Rooms      []Room    `json:"rooms,omitempty"`
+	Sessions   []Session `json:"sessions"`
 }
 type Store struct {
 	mu   sync.Mutex
@@ -93,6 +102,8 @@ var srsRTCProxy http.Handler
 
 type aggregatedSession struct {
 	UserName    string   `json:"user_name"`
+	RoomID      int64    `json:"room_id,omitempty"`
+	RoomName    string   `json:"room_name,omitempty"`
 	Action      string   `json:"action"`
 	IP          string   `json:"ip"`
 	App         string   `json:"app"`
@@ -103,10 +114,24 @@ type aggregatedSession struct {
 	LastSeenAt  int64    `json:"last_seen_at"`
 }
 
+type roomView struct {
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	KeyID        int64  `json:"key_id"`
+	Token        string `json:"token"`
+	Scope        string `json:"scope"`
+	Enabled      bool   `json:"enabled"`
+	CreatedAt    int64  `json:"created_at"`
+	PublishCount int    `json:"publish_count"`
+	PlayCount    int    `json:"play_count"`
+}
+
 func configSnapshot() Config    { cfgMu.RLock(); defer cfgMu.RUnlock(); return cfg }
 func replaceConfig(next Config) { cfgMu.Lock(); cfg = next; cfgMu.Unlock() }
 
 const uiPath = "/app/ui/index.html"
+
+var roomNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
 func now() int64                { return time.Now().Unix() }
 func tokenHash(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
@@ -130,7 +155,7 @@ func (s *Store) load() error {
 	defer s.mu.Unlock()
 	b, err := os.ReadFile(s.path)
 	if os.IsNotExist(err) {
-		s.data = StoreData{NextID: 1, Keys: []Key{}, Sessions: []Session{}}
+		s.data = StoreData{NextID: 1, NextRoomID: 1, Keys: []Key{}, Rooms: []Room{}, Sessions: []Session{}}
 		return s.saveLocked()
 	}
 	if err != nil {
@@ -142,7 +167,31 @@ func (s *Store) load() error {
 	if s.data.NextID < 1 {
 		s.data.NextID = 1
 	}
+	if s.data.NextRoomID < 1 {
+		s.data.NextRoomID = 1
+	}
+	if s.data.Keys == nil {
+		s.data.Keys = []Key{}
+	}
+	if s.data.Rooms == nil {
+		s.data.Rooms = []Room{}
+	}
+	if s.data.Sessions == nil {
+		s.data.Sessions = []Session{}
+	}
 	changed := false
+	for _, room := range s.data.Rooms {
+		if room.ID >= s.data.NextRoomID {
+			s.data.NextRoomID = room.ID + 1
+			changed = true
+		}
+		for i := range s.data.Keys {
+			if s.data.Keys[i].ID == room.KeyID && s.data.Keys[i].RoomID != room.ID {
+				s.data.Keys[i].RoomID = room.ID
+				changed = true
+			}
+		}
+	}
 	for i := range s.data.Keys {
 		if s.data.Keys[i].Token == "" || s.data.Keys[i].TokenHash == "" {
 			token, err := newToken()
@@ -224,6 +273,38 @@ func normalizeStreamName(v string) (string, bool) {
 		return "", false
 	}
 	return v, true
+}
+
+func normalizeRoomName(v string) (string, bool) {
+	v = strings.TrimSpace(v)
+	return v, roomNamePattern.MatchString(v)
+}
+
+func roomByID(rooms []Room, id int64) (Room, bool) {
+	for _, room := range rooms {
+		if room.ID == id {
+			return room, true
+		}
+	}
+	return Room{}, false
+}
+
+func roomByStream(rooms []Room, stream string) (Room, bool) {
+	for _, room := range rooms {
+		if room.Name == stream {
+			return room, true
+		}
+	}
+	return Room{}, false
+}
+
+func keyByID(keys []Key, id int64) (Key, bool) {
+	for _, key := range keys {
+		if key.ID == id {
+			return key, true
+		}
+	}
+	return Key{}, false
 }
 
 func streamAllowed(allowedStream, stream string) bool {
@@ -401,6 +482,10 @@ func recordGatewaySession(k Key, action, ip, app, stream, protocol string) strin
 }
 
 func aggregateSessions(raw []Session) []aggregatedSession {
+	return aggregateSessionsWithRooms(raw, nil)
+}
+
+func aggregateSessionsWithRooms(raw []Session, rooms []Room) []aggregatedSession {
 	type aggregate struct {
 		item      aggregatedSession
 		clients   map[string]bool
@@ -412,6 +497,10 @@ func aggregateSessions(raw []Session) []aggregatedSession {
 		g := groups[key]
 		if g == nil {
 			g = &aggregate{item: aggregatedSession{UserName: s.UserName, Action: s.Action, IP: s.IP, App: s.App, Stream: s.Stream, StartedAt: s.StartedAt, LastSeenAt: s.LastSeenAt}, clients: map[string]bool{}, protocols: map[string]bool{}}
+			if room, ok := roomByStream(rooms, s.Stream); ok {
+				g.item.RoomID = room.ID
+				g.item.RoomName = room.Name
+			}
 			groups[key] = g
 		}
 		if s.ClientID != "" {
@@ -705,7 +794,27 @@ func listSessions(w http.ResponseWriter, r *http.Request) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	raw := append([]Session(nil), store.data.Sessions...)
-	aggregated := aggregateSessions(raw)
+	rooms := append([]Room(nil), store.data.Rooms...)
+	if value := strings.TrimSpace(r.URL.Query().Get("room_id")); value != "" {
+		roomID, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || roomID < 1 {
+			jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid room_id"})
+			return
+		}
+		room, ok := roomByID(rooms, roomID)
+		if !ok {
+			jsonOut(w, http.StatusNotFound, map[string]string{"error": "room not found"})
+			return
+		}
+		filtered := raw[:0]
+		for _, session := range raw {
+			if session.Stream == room.Name {
+				filtered = append(filtered, session)
+			}
+		}
+		raw = filtered
+	}
+	aggregated := aggregateSessionsWithRooms(raw, rooms)
 	publish, play := 0, 0
 	for _, session := range aggregated {
 		if session.Action == "on_publish" {
@@ -716,6 +825,214 @@ func listSessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOut(w, http.StatusOK, map[string]any{"counts": map[string]int{"publish": publish, "play": play}, "sessions": aggregated})
+}
+
+func roomViewLocked(room Room, aggregated []aggregatedSession) roomView {
+	view := roomView{ID: room.ID, Name: room.Name, KeyID: room.KeyID, CreatedAt: room.CreatedAt}
+	if key, ok := keyByID(store.data.Keys, room.KeyID); ok {
+		view.Token = key.Token
+		view.Scope = key.Scope
+		view.Enabled = key.Enabled
+	}
+	for _, session := range aggregated {
+		if session.RoomID != room.ID {
+			continue
+		}
+		if session.Action == "on_publish" {
+			view.PublishCount++
+		}
+		if session.Action == "on_play" {
+			view.PlayCount++
+		}
+	}
+	return view
+}
+
+func roomViewsLocked() []roomView {
+	aggregated := aggregateSessionsWithRooms(store.data.Sessions, store.data.Rooms)
+	out := make([]roomView, 0, len(store.data.Rooms))
+	for _, room := range store.data.Rooms {
+		out = append(out, roomViewLocked(room, aggregated))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+func listRooms(w http.ResponseWriter, r *http.Request) {
+	if !requireAuth(w, r) {
+		return
+	}
+	reconcileSessions()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	jsonOut(w, http.StatusOK, map[string]any{"rooms": roomViewsLocked()})
+}
+
+func createRoom(w http.ResponseWriter, r *http.Request) {
+	if !requireAuth(w, r) {
+		return
+	}
+	var payload struct {
+		Name string `json:"name"`
+	}
+	if err := readJSON(r, &payload); err != nil {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	name, ok := normalizeRoomName(payload.Name)
+	if !ok {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "room name must be 1-64 lowercase letters, numbers, hyphens or underscores and start with a letter or number"})
+		return
+	}
+	token, err := newToken()
+	if err != nil {
+		jsonOut(w, http.StatusInternalServerError, map[string]string{"error": "token generation failed"})
+		return
+	}
+	createdAt := now()
+	store.mu.Lock()
+	for _, existing := range store.data.Rooms {
+		if existing.Name == name {
+			store.mu.Unlock()
+			jsonOut(w, http.StatusConflict, map[string]string{"error": "room name already exists"})
+			return
+		}
+	}
+	if store.data.NextID < 1 {
+		store.data.NextID = 1
+	}
+	if store.data.NextRoomID < 1 {
+		store.data.NextRoomID = 1
+	}
+	oldNextID, oldNextRoomID := store.data.NextID, store.data.NextRoomID
+	keyID, roomID := store.data.NextID, store.data.NextRoomID
+	store.data.NextID++
+	store.data.NextRoomID++
+	key := Key{ID: keyID, RoomID: roomID, Name: name, Token: token, TokenHash: tokenHash(token), Scope: "both", Stream: name, Enabled: true, CreatedAt: createdAt}
+	room := Room{ID: roomID, Name: name, KeyID: keyID, CreatedAt: createdAt}
+	store.data.Keys = append(store.data.Keys, key)
+	store.data.Rooms = append(store.data.Rooms, room)
+	if err := store.saveLocked(); err != nil {
+		store.data.Keys = store.data.Keys[:len(store.data.Keys)-1]
+		store.data.Rooms = store.data.Rooms[:len(store.data.Rooms)-1]
+		store.data.NextID, store.data.NextRoomID = oldNextID, oldNextRoomID
+		store.mu.Unlock()
+		jsonOut(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	view := roomViewLocked(room, nil)
+	store.mu.Unlock()
+	jsonOut(w, http.StatusCreated, map[string]any{"room": view})
+}
+
+func toggleRoom(w http.ResponseWriter, r *http.Request) {
+	if !requireAuth(w, r) {
+		return
+	}
+	roomID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || roomID < 1 {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid room id"})
+		return
+	}
+	var payload struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readJSON(r, &payload); err != nil {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	var kick []string
+	store.mu.Lock()
+	room, found := roomByID(store.data.Rooms, roomID)
+	if !found {
+		store.mu.Unlock()
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "room not found"})
+		return
+	}
+	keyIndex := -1
+	for i := range store.data.Keys {
+		if store.data.Keys[i].ID == room.KeyID {
+			keyIndex = i
+			break
+		}
+	}
+	if keyIndex < 0 {
+		store.mu.Unlock()
+		jsonOut(w, http.StatusConflict, map[string]string{"error": "room token is missing"})
+		return
+	}
+	previous := store.data.Keys[keyIndex].Enabled
+	store.data.Keys[keyIndex].Enabled = payload.Enabled
+	if !payload.Enabled {
+		for _, session := range store.data.Sessions {
+			if session.KeyID == room.KeyID {
+				kick = append(kick, session.ClientID)
+			}
+		}
+	}
+	if err := store.saveLocked(); err != nil {
+		store.data.Keys[keyIndex].Enabled = previous
+		store.mu.Unlock()
+		jsonOut(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	view := roomViewLocked(room, aggregateSessionsWithRooms(store.data.Sessions, store.data.Rooms))
+	store.mu.Unlock()
+	for _, clientID := range kick {
+		kickClient(clientID)
+	}
+	jsonOut(w, http.StatusOK, map[string]any{"room": view})
+}
+
+func deleteRoom(w http.ResponseWriter, r *http.Request) {
+	if !requireAuth(w, r) {
+		return
+	}
+	roomID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	if err != nil || roomID < 1 {
+		jsonOut(w, http.StatusBadRequest, map[string]string{"error": "invalid room id"})
+		return
+	}
+	reconcileSessions()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	room, found := roomByID(store.data.Rooms, roomID)
+	if !found {
+		jsonOut(w, http.StatusNotFound, map[string]string{"error": "room not found"})
+		return
+	}
+	for _, session := range store.data.Sessions {
+		if session.Stream == room.Name || session.KeyID == room.KeyID {
+			jsonOut(w, http.StatusConflict, map[string]string{"error": "room has active connections"})
+			return
+		}
+	}
+	for _, key := range store.data.Keys {
+		if key.ID != room.KeyID && key.Stream == room.Name {
+			jsonOut(w, http.StatusConflict, map[string]string{"error": "room has additional bound tokens"})
+			return
+		}
+	}
+	rooms := make([]Room, 0, len(store.data.Rooms)-1)
+	for _, item := range store.data.Rooms {
+		if item.ID != room.ID {
+			rooms = append(rooms, item)
+		}
+	}
+	keys := make([]Key, 0, len(store.data.Keys)-1)
+	for _, key := range store.data.Keys {
+		if key.ID != room.KeyID {
+			keys = append(keys, key)
+		}
+	}
+	oldRooms, oldKeys := store.data.Rooms, store.data.Keys
+	store.data.Rooms, store.data.Keys = rooms, keys
+	if err := store.saveLocked(); err != nil {
+		store.data.Rooms, store.data.Keys = oldRooms, oldKeys
+		jsonOut(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	jsonOut(w, http.StatusOK, map[string]bool{"ok": true})
 }
 func createKey(w http.ResponseWriter, r *http.Request) {
 	if !requireAuth(w, r) {
@@ -1092,6 +1409,13 @@ func deleteKey(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/token/keys/"), 10, 64)
 	var kick []string
 	store.mu.Lock()
+	for _, room := range store.data.Rooms {
+		if room.KeyID == id {
+			store.mu.Unlock()
+			jsonOut(w, http.StatusConflict, map[string]string{"error": "room token must be managed through the room"})
+			return
+		}
+	}
 	kept := store.data.Keys[:0]
 	for _, k := range store.data.Keys {
 		if k.ID != id {
@@ -1320,6 +1644,24 @@ func serve() {
 	r.Post("/api/token/login", adminLogin)
 	r.Get("/api/token/me", adminMe)
 	r.Post("/api/token/logout", adminLogout)
+	r.HandleFunc("/api/token/rooms", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			listRooms(w, r)
+		} else if r.Method == http.MethodPost {
+			createRoom(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
+	r.HandleFunc("/api/token/rooms/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch {
+			toggleRoom(w, r)
+		} else if r.Method == http.MethodDelete {
+			deleteRoom(w, r)
+		} else {
+			http.NotFound(w, r)
+		}
+	})
 	r.HandleFunc("/api/token/keys", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			listKeys(w, r)

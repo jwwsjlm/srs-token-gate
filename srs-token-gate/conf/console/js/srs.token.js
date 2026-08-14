@@ -1,5 +1,5 @@
 scApp.config(["$routeProvider", function($routeProvider) {
-    $routeProvider.when("/tokens", {templateUrl:"views/tokens.html?v=2", controller:"CSCTokens"});
+    $routeProvider.when("/tokens", {templateUrl:"views/tokens.html?v=3", controller:"CSCTokens"});
 }]);
 
 // Keep the built-in SRS preview on the public reverse-proxy origin instead of
@@ -58,11 +58,15 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
     $scope.authenticated = false;
     $scope.login = {username:"admin", password:"", error:""};
     $scope.keys = [];
+    $scope.rooms = [];
     $scope.sessions = [];
     $scope.publishCount = 0;
     $scope.playCount = 0;
     $scope.createdToken = "";
-    $scope.address = {key:null, stream:"stream"};
+    $scope.createdRoom = null;
+    $scope.roomCreate = {name:""};
+    $scope.sessionRoom = null;
+    $scope.address = {room:null, key:null, stream:"stream"};
     $scope.publicConfig = {address:"", rtmpPort:1935};
     $scope.copyMessage = "";
     $scope.copyClass = "alert-success";
@@ -99,21 +103,57 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
         $scope.playCount = play;
     }
 
-    $scope.refresh = function() {
-        Promise.all([request("/api/token/keys"), request("/api/token/sessions")]).then(function(values) {
+    function findByID(items, id) {
+        if (!id) return null;
+        for (var i = 0; i < (items || []).length; i++) {
+            if (items[i].id === id) return items[i];
+        }
+        return null;
+    }
+
+    function roomToken(room) {
+        return room ? findByID($scope.keys, room.key_id) : null;
+    }
+
+    $scope.addressKeys = function() {
+        var room = $scope.address.room;
+        if (!room) return $scope.keys;
+        return ($scope.keys || []).filter(function(key) {
+            return key.id === room.key_id || !key.stream || key.stream === room.name;
+        });
+    };
+
+    $scope.refresh = function(preferredRoomID) {
+        var selectedAddressRoomID = preferredRoomID || ($scope.address.room && $scope.address.room.id);
+        var selectedKeyID = $scope.address.key && $scope.address.key.id;
+        var selectedFilterID = $scope.sessionRoom && $scope.sessionRoom.id;
+        Promise.all([request("/api/token/keys"), request("/api/token/rooms")]).then(function(meta) {
+            var roomID = preferredRoomID || selectedFilterID;
+            var sessionURL = "/api/token/sessions" + (roomID ? "?room_id=" + encodeURIComponent(roomID) : "");
+            return request(sessionURL).then(function(sessionData) { return [meta[0], meta[1], sessionData]; });
+        }).then(function(values) {
             apply(function() {
                 $scope.authenticated = true;
                 $rootScope.tokenLoggedIn = true;
                 $scope.keys = values[0].keys || [];
-                $scope.sessions = values[1].sessions || [];
-                if (values[1].counts) {
-                    $scope.publishCount = values[1].counts.publish || 0;
-                    $scope.playCount = values[1].counts.play || 0;
+                $scope.rooms = values[1].rooms || [];
+                $scope.sessions = values[2].sessions || [];
+                $scope.sessionRoom = findByID($scope.rooms, preferredRoomID || selectedFilterID);
+                $scope.address.room = findByID($scope.rooms, selectedAddressRoomID);
+                if (!$scope.address.room && !$scope.address.key && $scope.rooms.length) $scope.address.room = $scope.rooms[0];
+                if ($scope.address.room) {
+                    $scope.address.stream = $scope.address.room.name;
+                    $scope.address.key = roomToken($scope.address.room) || findByID($scope.keys, selectedKeyID);
+                } else {
+                    $scope.address.key = findByID($scope.keys, selectedKeyID) || $scope.keys[0] || null;
+                    if ($scope.address.key && $scope.address.key.stream) $scope.address.stream = $scope.address.key.stream;
+                }
+                if (values[2].counts) {
+                    $scope.publishCount = values[2].counts.publish || 0;
+                    $scope.playCount = values[2].counts.play || 0;
                 } else {
                     updateConnectionCounts($scope.sessions);
                 }
-                if (!$scope.address.key && $scope.keys.length) $scope.address.key = $scope.keys[0];
-                if ($scope.address.key && $scope.address.key.stream) $scope.address.stream = $scope.address.key.stream;
                 $scope.rememberKey($scope.address.key);
             });
         }).catch(function(e) {
@@ -139,6 +179,51 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
     };
     $scope.create = {name:"", scope:"both", stream:""};
 
+    $scope.createRoom = function() {
+        request("/api/token/rooms", {method:"POST", body:JSON.stringify($scope.roomCreate)}).then(function(data) {
+            apply(function() {
+                $scope.createdRoom = data.room;
+                $scope.roomCreate.name = "";
+            });
+            $scope.refresh(data.room.id);
+        }).catch(function(e) { announceCopy((e && e.error) || "创建房间失败", "alert-error"); });
+    };
+
+    $scope.toggleRoom = function(room) {
+        request("/api/token/rooms/" + room.id, {method:"PATCH", body:JSON.stringify({enabled:!room.enabled})}).then(function() {
+            $scope.refresh();
+        }).catch(function(e) { announceCopy((e && e.error) || "更新房间失败", "alert-error"); });
+    };
+
+    $scope.deleteRoom = function(room) {
+        if (!window.confirm("确认删除房间 “" + room.name + "” 及其自带 Token 吗？")) return;
+        request("/api/token/rooms/" + room.id, {method:"DELETE"}).then(function() {
+            apply(function() {
+                if ($scope.address.room && $scope.address.room.id === room.id) $scope.address.room = null;
+                if ($scope.sessionRoom && $scope.sessionRoom.id === room.id) $scope.sessionRoom = null;
+            });
+            announceCopy("房间已删除", "alert-success");
+            $scope.refresh();
+        }).catch(function(e) { announceCopy((e && e.error) || "删除房间失败", "alert-error"); });
+    };
+
+    $scope.useRoom = function(room) {
+        $scope.address.room = room;
+        if (room) {
+            $scope.address.stream = room.name;
+            $scope.address.key = roomToken(room);
+            $scope.rememberKey($scope.address.key);
+        }
+    };
+
+    $scope.selectAddressRoom = function(room) {
+        $scope.useRoom(room);
+    };
+
+    $scope.selectSessionRoom = function() {
+        $scope.refresh();
+    };
+
     $scope.reloadSRS = function() {
         if (!window.confirm("确认重载统一配置吗？修改管理员、Session 或 Hook Secret 后仍需重启。")) return;
         request("/api/token/config/reload", {method:"POST"}).then(function(data) {
@@ -154,12 +239,17 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
     };
 
     $scope.useKey = function(key) {
+        var linkedRoom = key && key.room_id ? findByID($scope.rooms, key.room_id) : null;
+        $scope.address.room = linkedRoom;
         $scope.address.key = key;
-        if (key && key.stream) $scope.address.stream = key.stream;
+        if (linkedRoom) $scope.address.stream = linkedRoom.name;
+        else if (key && key.stream) $scope.address.stream = key.stream;
         $scope.rememberKey(key);
     };
     $scope.selectAddressKey = function(key) {
-        $scope.useKey(key);
+        $scope.address.key = key;
+        if (!$scope.address.room && key && key.stream) $scope.address.stream = key.stream;
+        $scope.rememberKey(key);
     };
     function announceCopy(message, cssClass) {
         apply(function() {
@@ -198,8 +288,9 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
         }
     };
     $scope.streamName = function() {
+        var roomStream = $scope.address.room && $scope.address.room.name;
         var keyStream = $scope.address.key && $scope.address.key.stream;
-        return (keyStream || $scope.address.stream || "stream").replace(/[^A-Za-z0-9_.-]/g, "");
+        return (roomStream || keyStream || $scope.address.stream || "stream").replace(/[^A-Za-z0-9_.-]/g, "");
     };
     $scope.rtmpServer = function() {
         var host = $scope.publicConfig.address || location.hostname;
@@ -234,10 +325,14 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
     $scope.$on("tokenLoggedOut", function() {
         $scope.authenticated = false;
         $scope.keys = [];
+        $scope.rooms = [];
         $scope.sessions = [];
         $scope.publishCount = 0;
         $scope.playCount = 0;
         $scope.createdToken = "";
+        $scope.createdRoom = null;
+        $scope.address.room = null;
+        $scope.sessionRoom = null;
     });
     var timer = setInterval(function() { if ($scope.authenticated) $scope.refresh(); }, 5000);
     $scope.$on("$destroy", function() {

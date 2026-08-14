@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -453,6 +455,216 @@ func TestStreamRestriction(t *testing.T) {
 	}
 	if _, ok := normalizeStreamName(strings.Repeat("a", 129)); ok {
 		t.Fatal("overlong stream name was accepted")
+	}
+}
+
+func TestRoomNameValidation(t *testing.T) {
+	valid := []string{"huiyi", "huiyi-01", "room_2", "a"}
+	for _, input := range valid {
+		if got, ok := normalizeRoomName(input); !ok || got != input {
+			t.Fatalf("valid room name %q rejected: got=%q ok=%v", input, got, ok)
+		}
+	}
+	invalid := []string{"", "HuiYi", "hui.yi", "-room", "room name", "会议室", strings.Repeat("a", 65)}
+	for _, input := range invalid {
+		if _, ok := normalizeRoomName(input); ok {
+			t.Fatalf("invalid room name %q accepted", input)
+		}
+	}
+}
+
+func TestCreateRoomPersistsBoundTokenAndLegacyDataLoads(t *testing.T) {
+	oldCfg, oldStore := cfg, store
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "test-password"
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	store = &Store{path: path, data: StoreData{NextID: 4, NextRoomID: 2, Keys: []Key{}, Rooms: []Room{}, Sessions: []Session{}}}
+	t.Cleanup(func() { cfg, store = oldCfg, oldStore })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/token/rooms", strings.NewReader(`{"name":"huiyi-01"}`))
+	req.SetBasicAuth("admin", "test-password")
+	resp := httptest.NewRecorder()
+	createRoom(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("create room status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if len(store.data.Rooms) != 1 || len(store.data.Keys) != 1 {
+		t.Fatalf("room/key not created atomically: %#v", store.data)
+	}
+	room, key := store.data.Rooms[0], store.data.Keys[0]
+	if room.ID != 2 || room.Name != "huiyi-01" || room.KeyID != key.ID {
+		t.Fatalf("unexpected room: %#v key=%#v", room, key)
+	}
+	if key.RoomID != room.ID || key.Scope != "both" || key.Stream != room.Name || !key.Enabled || key.Token == "" {
+		t.Fatalf("unexpected room token: %#v", key)
+	}
+	validated, valid := validate(key.Token, "on_publish")
+	if !valid || !streamAllowed(validated.Stream, room.Name) || streamAllowed(validated.Stream, "other-room") {
+		t.Fatalf("room token stream restriction failed: key=%#v valid=%v", validated, valid)
+	}
+
+	reloaded := &Store{path: path}
+	if err := reloaded.load(); err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.data.Rooms) != 1 || reloaded.data.Keys[0].RoomID != room.ID {
+		t.Fatalf("room data did not reload: %#v", reloaded.data)
+	}
+
+	legacyPath := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"next_id":2,"keys":[{"id":1,"name":"legacy","token":"old","token_hash":"hash","scope":"both","enabled":true}],"sessions":[]}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	legacy := &Store{path: legacyPath}
+	if err := legacy.load(); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.data.NextRoomID != 1 || len(legacy.data.Rooms) != 0 || len(legacy.data.Keys) != 1 {
+		t.Fatalf("legacy data compatibility failed: %#v", legacy.data)
+	}
+}
+
+func TestCreateRoomRejectsDuplicateName(t *testing.T) {
+	oldCfg, oldStore := cfg, store
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "test-password"
+	store = &Store{path: filepath.Join(t.TempDir(), "tokens.json"), data: StoreData{NextID: 2, NextRoomID: 2, Rooms: []Room{{ID: 1, Name: "huiyi-01", KeyID: 1}}, Keys: []Key{{ID: 1, RoomID: 1, Name: "huiyi-01", Scope: "both", Stream: "huiyi-01", Enabled: true}}}}
+	t.Cleanup(func() { cfg, store = oldCfg, oldStore })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/token/rooms", strings.NewReader(`{"name":"huiyi-01"}`))
+	req.SetBasicAuth("admin", "test-password")
+	resp := httptest.NewRecorder()
+	createRoom(resp, req)
+	if resp.Code != http.StatusConflict {
+		t.Fatalf("duplicate room status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestRoomSessionFilterAndAnnotations(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":0,"clients":[{"id":"pub-a"},{"id":"play-a"},{"id":"pub-b"}]}`))
+	}))
+	defer server.Close()
+	oldCfg, oldStore := cfg, store
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "test-password"
+	cfg.SRSAPI = server.URL
+	store = &Store{path: filepath.Join(t.TempDir(), "tokens.json"), data: StoreData{
+		NextID: 3, NextRoomID: 3,
+		Rooms: []Room{{ID: 1, Name: "room-a", KeyID: 1}, {ID: 2, Name: "room-b", KeyID: 2}},
+		Keys:  []Key{{ID: 1, RoomID: 1}, {ID: 2, RoomID: 2}},
+		Sessions: []Session{
+			{ClientID: "pub-a", KeyID: 1, Action: "on_publish", Stream: "room-a", IP: "1.1.1.1"},
+			{ClientID: "play-a", KeyID: 1, Action: "on_play", Stream: "room-a", IP: "1.1.1.2"},
+			{ClientID: "pub-b", KeyID: 2, Action: "on_publish", Stream: "room-b", IP: "1.1.1.3"},
+		},
+	}}
+	t.Cleanup(func() { cfg, store = oldCfg, oldStore })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/token/sessions?room_id=1", nil)
+	req.SetBasicAuth("admin", "test-password")
+	resp := httptest.NewRecorder()
+	listSessions(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("list sessions status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		Counts   map[string]int      `json:"counts"`
+		Sessions []aggregatedSession `json:"sessions"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Counts["publish"] != 1 || body.Counts["play"] != 1 || len(body.Sessions) != 2 {
+		t.Fatalf("unexpected filtered sessions: %#v", body)
+	}
+	for _, session := range body.Sessions {
+		if session.RoomID != 1 || session.RoomName != "room-a" || session.Stream != "room-a" {
+			t.Fatalf("missing room annotation: %#v", session)
+		}
+	}
+}
+
+func TestRoomDisableAndDeleteRules(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/api/v1/clients/") && r.URL.Path != "/api/v1/clients/" {
+			_, _ = w.Write([]byte(`{"code":0}`))
+			return
+		}
+		clients := []string{}
+		if store != nil {
+			store.mu.Lock()
+			for _, session := range store.data.Sessions {
+				clients = append(clients, `{"id":"`+session.ClientID+`"}`)
+			}
+			store.mu.Unlock()
+		}
+		_, _ = w.Write([]byte(`{"code":0,"clients":[` + strings.Join(clients, ",") + `]}`))
+	}))
+	defer server.Close()
+
+	oldCfg, oldStore := cfg, store
+	cfg.Admin.Username = "admin"
+	cfg.Admin.Password = "test-password"
+	cfg.SRSAPI = server.URL
+	store = &Store{path: filepath.Join(t.TempDir(), "tokens.json"), data: StoreData{
+		NextID: 3, NextRoomID: 2,
+		Rooms:    []Room{{ID: 1, Name: "room-a", KeyID: 1}},
+		Keys:     []Key{{ID: 1, RoomID: 1, Name: "room-a", Token: "room-token", TokenHash: tokenHash("room-token"), Scope: "both", Stream: "room-a", Enabled: true}},
+		Sessions: []Session{{ClientID: "active", KeyID: 1, Action: "on_publish", Stream: "room-a"}},
+	}}
+	t.Cleanup(func() { cfg, store = oldCfg, oldStore })
+
+	router := chi.NewRouter()
+	router.Patch("/api/token/rooms/{id}", toggleRoom)
+	router.Delete("/api/token/rooms/{id}", deleteRoom)
+	router.Delete("/api/token/keys/{id}", deleteKey)
+
+	disable := httptest.NewRequest(http.MethodPatch, "/api/token/rooms/1", strings.NewReader(`{"enabled":false}`))
+	disable.SetBasicAuth("admin", "test-password")
+	disableResp := httptest.NewRecorder()
+	router.ServeHTTP(disableResp, disable)
+	if disableResp.Code != http.StatusOK || store.data.Keys[0].Enabled {
+		t.Fatalf("disable room failed status=%d body=%s key=%#v", disableResp.Code, disableResp.Body.String(), store.data.Keys[0])
+	}
+
+	deleteActive := httptest.NewRequest(http.MethodDelete, "/api/token/rooms/1", nil)
+	deleteActive.SetBasicAuth("admin", "test-password")
+	deleteActiveResp := httptest.NewRecorder()
+	router.ServeHTTP(deleteActiveResp, deleteActive)
+	if deleteActiveResp.Code != http.StatusConflict {
+		t.Fatalf("active room delete status=%d body=%s", deleteActiveResp.Code, deleteActiveResp.Body.String())
+	}
+
+	store.mu.Lock()
+	store.data.Sessions = nil
+	store.data.Keys = append(store.data.Keys, Key{ID: 2, Name: "extra", Stream: "room-a", Scope: "play", Enabled: true})
+	store.mu.Unlock()
+	deleteBound := httptest.NewRequest(http.MethodDelete, "/api/token/rooms/1", nil)
+	deleteBound.SetBasicAuth("admin", "test-password")
+	deleteBoundResp := httptest.NewRecorder()
+	router.ServeHTTP(deleteBoundResp, deleteBound)
+	if deleteBoundResp.Code != http.StatusConflict {
+		t.Fatalf("bound token room delete status=%d body=%s", deleteBoundResp.Code, deleteBoundResp.Body.String())
+	}
+
+	managedKeyDelete := httptest.NewRequest(http.MethodDelete, "/api/token/keys/1", nil)
+	managedKeyDelete.SetBasicAuth("admin", "test-password")
+	managedKeyDeleteResp := httptest.NewRecorder()
+	router.ServeHTTP(managedKeyDeleteResp, managedKeyDelete)
+	if managedKeyDeleteResp.Code != http.StatusConflict {
+		t.Fatalf("managed key delete status=%d body=%s", managedKeyDeleteResp.Code, managedKeyDeleteResp.Body.String())
+	}
+
+	store.mu.Lock()
+	store.data.Keys = store.data.Keys[:1]
+	store.mu.Unlock()
+	deleteOK := httptest.NewRequest(http.MethodDelete, "/api/token/rooms/1", nil)
+	deleteOK.SetBasicAuth("admin", "test-password")
+	deleteOKResp := httptest.NewRecorder()
+	router.ServeHTTP(deleteOKResp, deleteOK)
+	if deleteOKResp.Code != http.StatusOK || len(store.data.Rooms) != 0 || len(store.data.Keys) != 0 {
+		t.Fatalf("room delete failed status=%d body=%s data=%#v", deleteOKResp.Code, deleteOKResp.Body.String(), store.data)
 	}
 }
 
