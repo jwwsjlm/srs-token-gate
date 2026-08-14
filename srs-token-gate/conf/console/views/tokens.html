@@ -18,7 +18,7 @@
             <div class="accordion-heading" sc-collapse="in"><a class="accordion-toggle" href="javascript:void(0)">房间管理</a></div>
             <div class="accordion-body collapse"><div class="accordion-inner">
                 <form class="form-inline" ng-submit="createRoom()">
-                    <input type="text" ng-model="roomCreate.name" maxlength="64" pattern="[a-z0-9][a-z0-9_-]{0,63}" placeholder="房间名，例如 huiyi-01" required>
+                    <input type="text" ng-model="roomCreate.name" maxlength="64" pattern="[a-z0-9][a-z0-9_\-]{0,63}" placeholder="房间名，例如 huiyi-01" required>
                     <button class="btn btn-primary" type="submit">创建房间并生成 Token</button>
                     <span class="help-inline">房间名会直接显示在推拉流地址中，仅支持小写字母、数字、- 和 _</span>
                 </form>
