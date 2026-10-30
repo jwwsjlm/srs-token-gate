@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
+  <title>直播观看 · SRS Token Gate</title>
+  <link rel="stylesheet" href="/watch-assets/watch.css">
+  <script defer src="/watch-assets/hls.min.js"></script>
+  <script defer src="/watch-assets/watch.js"></script>
+</head>
+<body>
+  <main>
+    <header><span>SRS Token Gate</span><h1 id="room">直播观看</h1></header>
+    <video id="video" controls playsinline muted autoplay aria-label="直播画面"></video>
+    <div class="toolbar">
+      <p id="status" role="status" aria-live="polite">正在连接直播…</p>
+      <button id="play" hidden>点击播放</button>
+      <button id="sound">开启声音</button>
+      <button id="retry">重新连接</button>
+    </div>
+    <p class="note">此链接仅用于本次直播。短暂断线会自动重连。</p>
+  </main>
+</body>
+</html>

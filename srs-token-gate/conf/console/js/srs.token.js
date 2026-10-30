@@ -1,5 +1,5 @@
 scApp.config(["$routeProvider", function($routeProvider) {
-    $routeProvider.when("/tokens", {templateUrl:"views/tokens.html?v=3", controller:"CSCTokens"});
+    $routeProvider.when("/tokens", {templateUrl:"views/tokens.html?v=4", controller:"CSCTokens"});
 }]);
 
 // Keep the built-in SRS preview on the public reverse-proxy origin instead of
@@ -64,6 +64,8 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
     $scope.playCount = 0;
     $scope.createdToken = "";
     $scope.createdRoom = null;
+    $scope.share = null;
+    $scope.shareBusy = false;
     $scope.roomCreate = {name:""};
     $scope.sessionRoom = null;
     $scope.address = {room:null, key:null, stream:"stream"};
@@ -156,6 +158,7 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
                 }
                 $scope.rememberKey($scope.address.key);
             });
+            $scope.refreshShare();
         }).catch(function(e) {
             if (e && e.unauthorized) apply(function() { $scope.authenticated = false; $rootScope.tokenLoggedIn = false; });
         });
@@ -214,6 +217,8 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
             $scope.address.key = roomToken(room);
             $scope.rememberKey($scope.address.key);
         }
+        $scope.share = null;
+        $scope.refreshShare();
     };
 
     $scope.selectAddressRoom = function(room) {
@@ -235,7 +240,7 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
     };
 
     $scope.toggle = function(key) {
-        request("/api/token/keys/" + key.id, {method:"PATCH", body:JSON.stringify({enabled:!key.enabled})}).then($scope.refresh);
+        request("/api/token/keys/" + key.id, {method:"PATCH", body:JSON.stringify({enabled:!key.enabled})}).then(function() { $scope.refresh(); });
     };
 
     $scope.useKey = function(key) {
@@ -245,6 +250,8 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
         if (linkedRoom) $scope.address.stream = linkedRoom.name;
         else if (key && key.stream) $scope.address.stream = key.stream;
         $scope.rememberKey(key);
+        $scope.share = null;
+        $scope.refreshShare();
     };
     $scope.selectAddressKey = function(key) {
         $scope.address.key = key;
@@ -310,6 +317,45 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
     };
     $scope.obsKey = function() { var k=$scope.address.key; return k ? $scope.streamName()+"?token="+k.token : ""; };
 
+    var shareVersion = 0;
+    $scope.shareStatus = function() {
+        var labels = {playing:"分享已开启", closed:"分享已关闭", reconnecting:"等待推流重连（30 秒内保留链接）", ended:"尚未生成或本次分享已结束", unavailable:"暂时无法确认推流状态，分享播放已暂停"};
+        return labels[$scope.share && $scope.share.status] || "正在读取分享状态…";
+    };
+    $scope.shareURL = function() { return $scope.share && $scope.share.path ? location.origin + $scope.share.path : ""; };
+    $scope.refreshShare = function() {
+        var room = $scope.address.room;
+        var version = ++shareVersion;
+        if (!room) { $scope.share = null; return; }
+        if ($scope.shareBusy) return;
+        return request("/api/token/rooms/" + room.id + "/share").then(function(data) {
+            apply(function() {
+                if (version === shareVersion && $scope.address.room && room.id === $scope.address.room.id) $scope.share = data;
+            });
+        }).catch(function() {
+            apply(function() { if (version === shareVersion) $scope.share = {status:"unavailable"}; });
+        });
+    };
+    function changeShare(method, enabled) {
+        var room = $scope.address.room;
+        if (!room || $scope.shareBusy) return;
+        ++shareVersion;
+        $scope.shareBusy = true;
+        var options = {method:method};
+        if (method === "PATCH") options.body = JSON.stringify({enabled:enabled});
+        request("/api/token/rooms/" + room.id + "/share", options).then(function(data) {
+            apply(function() { if ($scope.address.room && room.id === $scope.address.room.id) $scope.share = data; });
+            announceCopy(method === "POST" ? "分享链接已生成，打开即可观看" : (enabled ? "分享已开启" : "分享已关闭"), "alert-success");
+        }).catch(function(e) {
+            announceCopy(e.error || "分享操作失败，请重试", "alert-error");
+        }).finally(function() {
+            apply(function() { $scope.shareBusy = false; });
+            $scope.refreshShare();
+        });
+    }
+    $scope.createShare = function() { changeShare("POST"); };
+    $scope.toggleShare = function() { changeShare("PATCH", !$scope.share.enabled); };
+
     fetch("/api/token/me", {credentials:"same-origin"}).then(function(r) {
         if (r.ok) $scope.refresh(); else apply(function() { $scope.authenticated = false; });
     });
@@ -331,6 +377,8 @@ scApp.controller("CSCTokens", ["$scope", "$rootScope", "$location", "$sc_nav", f
         $scope.playCount = 0;
         $scope.createdToken = "";
         $scope.createdRoom = null;
+        $scope.share = null;
+        ++shareVersion;
         $scope.address.room = null;
         $scope.sessionRoom = null;
     });

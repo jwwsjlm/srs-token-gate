@@ -81,6 +81,15 @@
                     <tr><th>OBS 服务器（Server）</th><td><code>{{rtmpServer()}}</code> <button class="btn btn-mini" ng-click="copy(rtmpServer())">复制服务器</button></td></tr>
                     <tr><th>OBS 串流密钥（Stream Key）</th><td><code>{{obsKey()}}</code> <button class="btn btn-mini" ng-click="copy(obsKey())">复制串流密钥</button></td></tr>
                     <tr><th>完整推流地址（FFmpeg/单地址客户端）</th><td><code>{{rtmpURL()}}</code> <button class="btn btn-mini" ng-click="copy(rtmpURL())">复制完整地址</button></td></tr>
+                    <tr ng-show="address.room"><th>免登录观看链接<br><small>仅本次直播有效</small></th><td>
+                        <div role="status">{{shareStatus()}}</div>
+                        <div ng-show="share.path" style="margin:8px 0;overflow-wrap:anywhere"><code>{{shareURL()}}</code></div>
+                        <button class="btn btn-mini btn-primary" ng-show="!share.path" ng-disabled="shareBusy || !address.room.enabled" ng-click="createShare()">生成分享</button>
+                        <button class="btn btn-mini" ng-show="share.path" ng-click="copy(shareURL())">复制链接</button>
+                        <a class="btn btn-mini" ng-show="share.path" ng-href="{{shareURL()}}" target="_blank" rel="noopener noreferrer">打开预览</a>
+                        <button class="btn btn-mini" ng-show="share.path" ng-disabled="shareBusy" ng-click="toggleShare()">{{share.enabled?'关闭分享':'开启分享'}}</button>
+                        <div class="help-block" style="margin:6px 0 0">先推流再生成；断线 30 秒内可重连，超过后旧链接失效。关闭分享不影响推流。</div>
+                    </td></tr>
                     <tr><th>RTMP 拉流地址</th><td><code>{{rtmpURL()}}</code> <button class="btn btn-mini" ng-click="copy(rtmpURL())">复制</button></td></tr>
                     <tr><th>HTTP-FLV</th><td><code>{{flvURL()}}</code> <button class="btn btn-mini" ng-click="copy(flvURL())">复制</button></td></tr>
                     <tr><th>HLS</th><td><code>{{hlsURL()}}</code> <button class="btn btn-mini" ng-click="copy(hlsURL())">复制</button></td></tr>

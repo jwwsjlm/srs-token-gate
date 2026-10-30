@@ -6,6 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download || echo "GOPROXY unavailable, using vendored dependencies"
 COPY vendor ./vendor
 COPY *.go ./
+COPY ui ./ui
 RUN CGO_ENABLED=0 GOOS=linux go build -mod=vendor -trimpath -ldflags='-s -w' -o /out/token-auth .
 FROM scratch
 COPY --from=build /out/token-auth /app/token-auth

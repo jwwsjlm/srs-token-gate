@@ -566,10 +566,11 @@ func hook(w http.ResponseWriter, r *http.Request) {
 	cid, _ := p["client_id"].(string)
 	if action == "on_publish" || action == "on_play" {
 		token := extractToken(p)
-		k, ok := validate(token, action)
+		app, _ := p["app"].(string)
 		rawStream, _ := p["stream"].(string)
 		stream := normalizePlaybackStream(rawStream)
-		if ok && !streamAllowed(k.Stream, stream) {
+		k, ok := validateStream(token, action, app, stream)
+		if isShareToken(token) && p["vhost"] != "__defaultVhost__" {
 			ok = false
 		}
 		if !ok {
@@ -589,7 +590,11 @@ func hook(w http.ResponseWriter, r *http.Request) {
 		s.App, _ = p["app"].(string)
 		s.Stream = stream
 		updateSession(s)
+		if action == "on_publish" {
+			shares.publish(publisher{ClientID: cid, App: app, Stream: stream})
+		}
 	} else if action == "on_unpublish" || action == "on_stop" || action == "on_close" {
+		shares.stop(cid)
 		removeSession(cid)
 	}
 	hookReply(0)
@@ -663,7 +668,14 @@ func mediaProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := cleanToken(r.URL.Query().Get("token"))
-	k, valid := validate(token, "on_play")
+	k, valid := validateStream(token, "on_play", "live", stream)
+	if isShareToken(token) {
+		w.Header().Set("Cache-Control", "no-store")
+		// Share credentials serve HLS only and cannot select another app or vhost.
+		if strings.HasSuffix(r.URL.Path, ".flv") || r.URL.Query().Has("app") || r.URL.Query().Has("vhost") || r.URL.Query().Has("__vhost__") {
+			valid = false
+		}
+	}
 	if !valid || !streamAllowed(k.Stream, stream) {
 		reason := "invalid_disabled_expired_or_scope"
 		if token == "" {
@@ -978,6 +990,9 @@ func toggleRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	view := roomViewLocked(room, aggregateSessionsWithRooms(store.data.Sessions, store.data.Rooms))
 	store.mu.Unlock()
+	if !payload.Enabled {
+		shares.endRoom(roomID)
+	}
 	for _, clientID := range kick {
 		kickClient(clientID)
 	}
@@ -1032,6 +1047,7 @@ func deleteRoom(w http.ResponseWriter, r *http.Request) {
 		jsonOut(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	shares.endRoom(roomID)
 	jsonOut(w, http.StatusOK, map[string]bool{"ok": true})
 }
 func createKey(w http.ResponseWriter, r *http.Request) {
@@ -1100,6 +1116,13 @@ func toggleKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = store.saveLocked()
+	if !p.Enabled {
+		for _, room := range store.data.Rooms {
+			if room.KeyID == id {
+				shares.endRoom(room.ID)
+			}
+		}
+	}
 	store.mu.Unlock()
 	for _, clientID := range kick {
 		kickClient(clientID)
@@ -1620,11 +1643,20 @@ func serve() {
 		}
 	}()
 	go watchConfig()
+	go func() {
+		shares.check()
+		ticker := time.NewTicker(sharePollInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			shares.check()
+		}
+	}()
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(sessionManager.LoadAndSave)
+	registerShareRoutes(r)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { jsonOut(w, 200, map[string]bool{"ok": true}) })
 	r.Get("/api/token/public-config", publicConfig)
 	r.Get("/internal/auth/check", func(w http.ResponseWriter, r *http.Request) {
